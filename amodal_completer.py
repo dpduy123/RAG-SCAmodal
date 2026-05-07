@@ -132,6 +132,7 @@ class AmodalCompleter:
         enable_critic: bool = True,
         critique_threshold: float = 7.0,
         max_critic_iter: int = 2,
+        mask_only: bool = False,
     ) -> dict:
         """
         Args:
@@ -144,6 +145,8 @@ class AmodalCompleter:
             enable_critic:       run Stage 3 semantic critique loop
             critique_threshold:  τ — minimum acceptable critic score in [0, 10]
             max_critic_iter:     maximum number of synthesis attempts
+            mask_only:           if True, skip SD2 diffusion entirely;
+                                 output RGBA = visible pixels + amodal mask shape
 
         Returns:
             dict with input_image, visible_mask, amodal_mask, inpainted_rgba,
@@ -168,6 +171,35 @@ class AmodalCompleter:
                 "input_image": image,
                 "visible_mask": visible_mask,
                 "amodal_mask": amodal_mask,
+                "inpainted_rgba": rgba,
+                "vlm_reasoning": vlm_guidance,
+                "critique_history": [],
+                "final_score": None,
+            }
+
+        # ── OUTPAINTING DETECTION ─────────────────────────────────────────
+        # If the missing region touches image edges, the object is cropped.
+        # Expand the canvas so SD2 can generate content beyond boundaries.
+        pad_info = self._detect_outpainting(missing_mask, H, W)
+        if pad_info["needs_outpaint"]:
+            print(f"[AmodalCompleter] 🔲 Outpainting detected! "
+                  f"Expanding canvas: top={pad_info['pad_top']}, "
+                  f"bottom={pad_info['pad_bottom']}, "
+                  f"left={pad_info['pad_left']}, right={pad_info['pad_right']}")
+            image, visible_mask, amodal_mask, missing_mask = \
+                self._expand_for_outpainting(image, visible_mask, amodal_mask, pad_info)
+            H, W = image.shape[:2]  # update dimensions
+
+        # ── MASK-ONLY MODE ────────────────────────────────────────────────
+        # Skip SD2 diffusion; return visible pixels + amodal mask shape.
+        if mask_only:
+            print("[AmodalCompleter] mask_only=True → skipping SD2 inpainting")
+            rgba = self._finalize_rgba(image, amodal_mask, H, W)
+            return {
+                "input_image": image,
+                "visible_mask": visible_mask,
+                "amodal_mask": amodal_mask,
+                "missing_mask": missing_mask,
                 "inpainted_rgba": rgba,
                 "vlm_reasoning": vlm_guidance,
                 "critique_history": [],
@@ -653,6 +685,113 @@ class AmodalCompleter:
         return chosen, info
 
     # ── Step 3: Target image preparation ──────────────────────────────────
+
+    # ── Outpainting support ──────────────────────────────────────────────
+
+    def _detect_outpainting(
+        self,
+        missing_mask: np.ndarray,
+        H: int,
+        W: int,
+        edge_margin: int = 5,
+    ) -> dict:
+        """
+        Detect if the missing region touches image boundaries (outpainting case).
+        Returns padding amounts for each edge.
+        """
+        touches_top    = missing_mask[:edge_margin, :].any()
+        touches_bottom = missing_mask[-edge_margin:, :].any()
+        touches_left   = missing_mask[:, :edge_margin].any()
+        touches_right  = missing_mask[:, -edge_margin:].any()
+
+        needs = touches_top or touches_bottom or touches_left or touches_right
+
+        if not needs:
+            return {"needs_outpaint": False,
+                    "pad_top": 0, "pad_bottom": 0,
+                    "pad_left": 0, "pad_right": 0}
+
+        # Pad by 25% of image dimension on each touching edge (min 64px)
+        pad_h = max(H // 4, 64)
+        pad_w = max(W // 4, 64)
+
+        return {
+            "needs_outpaint": True,
+            "pad_top":    pad_h if touches_top    else 0,
+            "pad_bottom": pad_h if touches_bottom else 0,
+            "pad_left":   pad_w if touches_left   else 0,
+            "pad_right":  pad_w if touches_right  else 0,
+        }
+
+    def _expand_for_outpainting(
+        self,
+        image: np.ndarray,
+        visible_mask: np.ndarray,
+        amodal_mask: np.ndarray,
+        pad_info: dict,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Expand image and masks with padding for outpainting.
+        The amodal mask is dilated into the padded region to give SD2
+        a target area to generate content.
+
+        Returns: (expanded_image, expanded_visible, expanded_amodal, expanded_missing)
+        """
+        pt = pad_info["pad_top"]
+        pb = pad_info["pad_bottom"]
+        pl = pad_info["pad_left"]
+        pr = pad_info["pad_right"]
+
+        # Pad image with neutral gray
+        exp_image = cv2.copyMakeBorder(
+            image, pt, pb, pl, pr,
+            cv2.BORDER_CONSTANT, value=[127, 127, 127]
+        )
+
+        # Pad masks with zeros (False)
+        exp_visible = cv2.copyMakeBorder(
+            visible_mask.astype(np.uint8), pt, pb, pl, pr,
+            cv2.BORDER_CONSTANT, value=0
+        ).astype(bool)
+
+        exp_amodal = cv2.copyMakeBorder(
+            amodal_mask.astype(np.uint8), pt, pb, pl, pr,
+            cv2.BORDER_CONSTANT, value=0
+        ).astype(bool)
+
+        # Dilate amodal mask into the padded region so SD2 knows where
+        # to generate content. Use an elliptical kernel sized to the padding.
+        max_pad = max(pt, pb, pl, pr)
+        kernel_size = max_pad * 2 + 1
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+        )
+        exp_amodal_dilated = cv2.dilate(
+            exp_amodal.astype(np.uint8), kernel
+        ).astype(bool)
+
+        # Only extend amodal into the padded border region,
+        # keep the original interior amodal mask unchanged.
+        eH, eW = exp_image.shape[:2]
+        border_region = np.zeros((eH, eW), dtype=bool)
+        border_region[:pt, :] = True                   # top pad
+        if pb > 0:
+            border_region[-pb:, :] = True              # bottom pad
+        border_region[:, :pl] = True                   # left pad
+        if pr > 0:
+            border_region[:, -pr:] = True              # right pad
+
+        # Final amodal = original padded amodal + dilated extension in borders
+        exp_amodal = exp_amodal | (exp_amodal_dilated & border_region)
+
+        # Missing = amodal but not visible
+        exp_missing = exp_amodal & (~exp_visible)
+
+        print(f"[Outpainting] Canvas: {image.shape[:2]} → {exp_image.shape[:2]}")
+        print(f"[Outpainting] Amodal area: {amodal_mask.sum():,} → {exp_amodal.sum():,} px")
+        print(f"[Outpainting] Missing area: {exp_missing.sum():,} px")
+
+        return exp_image, exp_visible, exp_amodal, exp_missing
 
     def _prepare_target_image(
         self,
