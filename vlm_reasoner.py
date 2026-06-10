@@ -32,7 +32,18 @@ class VLMReasoner:
         if self.model is None:
             return "ERROR: Model not loaded."
 
-        image_pil = Image.fromarray(image_np)
+        import cv2
+        if visible_mask is not None:
+            # Highlight the target object with a red contour
+            highlighted_img = image_np.copy()
+            contours, _ = cv2.findContours(visible_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Draw contour in Red (RGB format: 255, 0, 0)
+            cv2.drawContours(highlighted_img, contours, -1, (255, 0, 0), 3)
+            image_pil = Image.fromarray(highlighted_img)
+            prompt_text = "The target object is highlighted with a red outline in the image. Describe ONLY the missing or occluded parts of THIS specific target object to generate an inpainting prompt."
+        else:
+            image_pil = Image.fromarray(image_np)
+            prompt_text = "Describe the missing parts of the target object for inpainting prompt."
         
         # Standard Qwen3-VL chat format
         messages = [
@@ -40,7 +51,7 @@ class VLMReasoner:
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image_pil},
-                    {"type": "text", "text": "Describe the missing parts of the target object for inpainting prompt."}
+                    {"type": "text", "text": prompt_text}
                 ],
             }
         ]

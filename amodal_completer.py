@@ -175,13 +175,21 @@ class AmodalCompleter:
                 "vlm_reasoning": vlm_guidance,
                 "critique_history": [],
                 "final_score": None,
+                "pad_info": {"needs_outpaint": False, "pad_top": 0, "pad_bottom": 0, "pad_left": 0, "pad_right": 0},
             }
 
+        pad_info = {"needs_outpaint": False, "pad_top": 0, "pad_bottom": 0, "pad_left": 0, "pad_right": 0}
+        
         # ── OUTPAINTING DETECTION ─────────────────────────────────────────
         # If the missing region touches image edges, the object is cropped.
         # Expand the canvas so SD2 can generate content beyond boundaries.
-        pad_info = self._detect_outpainting(missing_mask, H, W)
-        if pad_info["needs_outpaint"]:
+        detect_info = self._detect_outpainting(missing_mask, H, W)
+        
+        # [TEMPORARILY DISABLED]
+        detect_info["needs_outpaint"] = False 
+        
+        if detect_info["needs_outpaint"]:
+            pad_info = detect_info
             print(f"[AmodalCompleter] 🔲 Outpainting detected! "
                   f"Expanding canvas: top={pad_info['pad_top']}, "
                   f"bottom={pad_info['pad_bottom']}, "
@@ -204,6 +212,7 @@ class AmodalCompleter:
                 "vlm_reasoning": vlm_guidance,
                 "critique_history": [],
                 "final_score": None,
+                "pad_info": pad_info,
             }
 
         # Fuse the two guidance signals via CLIP-verified Qwen reasoning.
@@ -292,6 +301,7 @@ class AmodalCompleter:
             "clip_verification": clip_info,
             "critique_history": critique_history,
             "final_score": critique_history[-1]["score"] if critique_history else None,
+            "pad_info": pad_info,
         }
 
     def _compose_for_critic(
