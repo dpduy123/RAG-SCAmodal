@@ -24,8 +24,8 @@ import json
 import os
 import torch
 import cv2
-from amodal_shape_predictor import Pix2GestaltPredictor
-from vlm_reasoner import VLMReasoner
+from agents import SemanticAgent, GeometryAgent, MultiAgentCritic
+from memory_bank import ZillizMemoryBank
 from dataclasses import dataclass
 from PIL import Image
 
@@ -37,6 +37,10 @@ class AmodalCompleter:
     _clip_processor = None
     _shape_predictor = None
     _vlm = None
+    _memory_bank = None
+    _semantic_agent = None
+    _geometry_agent = None
+    _critic_agent = None
 
     def __init__(
         self,
@@ -50,10 +54,16 @@ class AmodalCompleter:
         if AmodalCompleter._shape_predictor is None:
             from amodal_shape_predictor import Pix2GestaltPredictor
             AmodalCompleter._shape_predictor = Pix2GestaltPredictor(device=self.device)
+            AmodalCompleter._geometry_agent = GeometryAgent(AmodalCompleter._shape_predictor)
             
         if AmodalCompleter._vlm is None:
             from vlm_reasoner import VLMReasoner
             AmodalCompleter._vlm = VLMReasoner(device=self.device)
+            AmodalCompleter._semantic_agent = SemanticAgent(AmodalCompleter._vlm)
+            AmodalCompleter._critic_agent = MultiAgentCritic(AmodalCompleter._vlm)
+            
+        if AmodalCompleter._memory_bank is None:
+            AmodalCompleter._memory_bank = ZillizMemoryBank(device=self.device)
             
         self._load_models(inpainting_model_id, clip_model_id)
 
@@ -154,30 +164,37 @@ class AmodalCompleter:
         """
         H, W = image.shape[:2]
 
-        # ── DUAL GUIDANCE ─────────────────────────────────────────────────
-        # Branch A — Semantic guidance: VLM identifies the missing parts.
-        print("[AmodalCompleter] Dual-Guidance · Branch A: semantic reasoning (Qwen3-VL)...")
-        vlm_guidance = AmodalCompleter._vlm.reason_occlusion(image, visible_mask)
-        print(f"[VLM Reason]: {vlm_guidance}")
+        # ── RAG-SCAmodal: Retrieval-Augmented Generation ──────────────────
+        print("[AmodalCompleter] Step 1: Object Crop & CLIP Embedding...")
+        ys, xs = np.where(visible_mask)
+        if len(xs) == 0:
+            crop_np = image
+        else:
+            # Add 10% margin
+            x_min, x_max = xs.min(), xs.max()
+            y_min, y_max = ys.min(), ys.max()
+            w_m, h_m = int((x_max - x_min) * 0.1), int((y_max - y_min) * 0.1)
+            x1, y1 = max(0, x_min - w_m), max(0, y_min - h_m)
+            x2, y2 = min(W, x_max + w_m), min(H, y_max + h_m)
+            crop_np = image[y1:y2, x1:x2].copy()
+            # Gray out background within the crop
+            crop_mask = visible_mask[y1:y2, x1:x2]
+            crop_np[~crop_mask] = 127
+            
+        query_embed = AmodalCompleter._memory_bank.extract_dual_features(crop_np)
+        
+        print("[AmodalCompleter] Step 2: Retrieving Top-K shape priors from Memory Bank...")
+        top_k_priors = AmodalCompleter._memory_bank.retrieve(query_embed, top_k=5)
 
-        # Branch B — Geometric guidance: Pix2Gestalt predicts the amodal mask.
-        print("[AmodalCompleter] Dual-Guidance · Branch B: geometric shape (Pix2Gestalt)...")
-        amodal_mask = AmodalCompleter._shape_predictor.predict_full_shape(image, visible_mask)
-        missing_mask = amodal_mask & (~visible_mask.astype(bool))
+        print("[AmodalCompleter] Step 3: Semantic reasoning (SemanticAgent)...")
+        vlm_guidance = AmodalCompleter._semantic_agent.reason(image, visible_mask)
+        print(f"[Semantic Reason]: {vlm_guidance}")
 
-        if not missing_mask.any():
-            rgba = self._finalize_rgba(image, amodal_mask, H, W)
-            return {
-                "input_image": image,
-                "visible_mask": visible_mask,
-                "amodal_mask": amodal_mask,
-                "inpainted_rgba": rgba,
-                "vlm_reasoning": vlm_guidance,
-                "critique_history": [],
-                "final_score": None,
-                "pad_info": {"needs_outpaint": False, "pad_top": 0, "pad_bottom": 0, "pad_left": 0, "pad_right": 0},
-            }
-
+        print("[AmodalCompleter] Step 4: Geometric prediction (GeometryAgent - Best-of-N)...")
+        # Geometry Agent now returns a list of hypotheses
+        amodal_hypotheses = AmodalCompleter._geometry_agent.predict(image, visible_mask, top_k_priors, vlm_guidance, lambda_rag_threshold=0.6)
+        
+        # We will keep track of pad_info using the first hypothesis (M1) as reference
         pad_info = {"needs_outpaint": False, "pad_top": 0, "pad_bottom": 0, "pad_left": 0, "pad_right": 0}
         
         # ── OUTPAINTING DETECTION ─────────────────────────────────────────
@@ -199,15 +216,15 @@ class AmodalCompleter:
             H, W = image.shape[:2]  # update dimensions
 
         # ── MASK-ONLY MODE ────────────────────────────────────────────────
-        # Skip SD2 diffusion; return visible pixels + amodal mask shape.
+        # Skip SD2 diffusion; return visible pixels + the best amodal mask shape (M1 by default).
+        best_amodal_mask = amodal_hypotheses[0]
         if mask_only:
             print("[AmodalCompleter] mask_only=True → skipping SD2 inpainting")
-            rgba = self._finalize_rgba(image, amodal_mask, H, W)
+            rgba = self._finalize_rgba(image, best_amodal_mask, H, W)
             return {
                 "input_image": image,
                 "visible_mask": visible_mask,
-                "amodal_mask": amodal_mask,
-                "missing_mask": missing_mask,
+                "amodal_mask": best_amodal_mask,
                 "inpainted_rgba": rgba,
                 "vlm_reasoning": vlm_guidance,
                 "critique_history": [],
@@ -221,7 +238,7 @@ class AmodalCompleter:
         )
         target_img, _ = self._prepare_target_image(image, visible_mask)
 
-        # ── SYNTHESIS + SEMANTIC CRITIC LOOP (Stage 2 + Stage 3) ─────────
+        # ── SYNTHESIS + BEST-OF-N CRITIC LOOP ─────────
         sd_tok = AmodalCompleter._pipe.tokenizer
         prompt = self._truncate_to_tokens(
             f"{base_prompt}, centered, high quality, consistent lighting",
@@ -229,48 +246,57 @@ class AmodalCompleter:
         )
         guidance_scale = 7.5
         num_inference_steps = 30
-        critique_history: list[dict] = []
-        rgba = None
-        blended_rgb = None
-
-        n_iters = max_critic_iter if enable_critic else 1
-        for crit_iter in range(n_iters):
-            print(f"[AmodalCompleter] Synthesis attempt {crit_iter + 1}/{n_iters} "
-                  f"(guidance={guidance_scale}, steps={num_inference_steps})")
+        
+        best_candidate = None
+        best_score = -1.0
+        best_rgba = None
+        best_amodal_mask = None
+        best_critique = None
+        
+        critique_history = []
+        
+        for idx, current_amodal_mask in enumerate(amodal_hypotheses):
+            current_missing_mask = current_amodal_mask & (~visible_mask.astype(bool))
+            if not current_missing_mask.any():
+                continue
+                
+            print(f"[AmodalCompleter] Synthesis attempt for Hypothesis M{idx+1}/{len(amodal_hypotheses)}")
 
             inpaint_img, _ = self._inpaint_step(
-                target_img, missing_mask, prompt, H, W,
+                target_img, current_missing_mask, prompt, H, W,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps,
             )
-            blended_rgb = self._alpha_blend(image, inpaint_img, visible_mask, amodal_mask)
-            rgba = self._finalize_rgba(blended_rgb, amodal_mask, H, W)
+            blended_rgb = self._alpha_blend(image, inpaint_img, visible_mask, current_amodal_mask)
+            rgba = self._finalize_rgba(blended_rgb, current_amodal_mask, H, W)
 
             if not enable_critic:
+                best_rgba = rgba
+                best_amodal_mask = current_amodal_mask
                 break
 
-            # Stage 3 — Semantic Critic: feed the completed object back to the VLM.
-            critic_input = self._compose_for_critic(blended_rgb, amodal_mask)
-            critique = AmodalCompleter._vlm.critique(critic_input, original_image_np=image)
+            # Stage 3 — Semantic Critic: MultiAgentCritic evaluates the completed object
+            critic_input = self._compose_for_critic(blended_rgb, current_amodal_mask)
+            critique = AmodalCompleter._critic_agent.evaluate(critic_input, original_image_np=image)
+            critique["hypothesis_id"] = f"M{idx+1}"
             critique_history.append(critique)
-            print(f"[Critic iter {crit_iter}] score={critique['score']:.2f} "
+            
+            print(f"[Critic M{idx+1}] score={critique['score']:.2f} "
                   f"(struct={critique['structural']}, tex={critique['texture']}, "
-                  f"ctx={critique['context']}) — {critique['feedback']}")
+                  f"ctx={critique['context']})")
 
-            if critique["score"] >= critique_threshold:
-                print(f"[Critic] Accepted at iter {crit_iter} "
-                      f"(score {critique['score']:.2f} ≥ τ={critique_threshold}).")
-                break
-
-            # Refinement: inject critic feedback into prompt and tighten guidance.
-            refined = (
-                f"{base_prompt}, addressing: {critique['feedback']}, "
-                f"photorealistic, anatomically correct, seamless texture, "
-                f"consistent lighting"
-            )
-            prompt = self._truncate_to_tokens(refined, sd_tok, max_tokens=70)
-            guidance_scale = min(guidance_scale + 1.5, 12.0)
-            num_inference_steps = min(num_inference_steps + 10, 50)
+            if critique["score"] > best_score:
+                best_score = critique["score"]
+                best_rgba = rgba
+                best_amodal_mask = current_amodal_mask
+                best_critique = critique
+                
+        # If no missing regions were found in any hypothesis
+        if best_rgba is None:
+            best_amodal_mask = amodal_hypotheses[0]
+            best_rgba = self._finalize_rgba(image, best_amodal_mask, H, W)
+            
+        print(f"[AmodalCompleter] Best-of-N selected Candidate with score {best_score:.2f}")
 
         # Persist VLM reasoning + critique trace for logging/inspection.
         try:
@@ -295,12 +321,12 @@ class AmodalCompleter:
         return {
             "input_image": image,
             "visible_mask": visible_mask,
-            "amodal_mask": amodal_mask,
-            "inpainted_rgba": rgba,
+            "amodal_mask": best_amodal_mask,
+            "inpainted_rgba": best_rgba,
             "vlm_reasoning": vlm_guidance,
             "clip_verification": clip_info,
             "critique_history": critique_history,
-            "final_score": critique_history[-1]["score"] if critique_history else None,
+            "final_score": best_score if enable_critic else None,
             "pad_info": pad_info,
         }
 
