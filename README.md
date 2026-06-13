@@ -9,18 +9,21 @@ This repository implements a highly sophisticated amodal completion pipeline. By
 The system has aggressively transitioned from a heuristic iterative approach to a **Multi-Agent RAG Architecture**:
 
 1. **Modal Segmentation (SAM 2)**: Detects the visible part of the occluded object and background elements.
-2. **Object Crop & CLIP Encoder**: Crops the target object and extracts a 512-dimensional feature vector using `openai/clip-vit-base-patch32`.
-3. **Memory Bank (Zilliz Cloud / Milvus)**: Searches a vector database (e.g., indexed from COCOA/LVIS datasets) using Cosine Similarity to retrieve the **Top-K most similar amodal shapes** (priors).
+2. **Dual Encoder (CLIP + DINOv2)**: Crops the target object and extracts a concatenated **1280-dimensional feature vector** capturing both semantic (CLIP) and geometric (DINOv2) traits.
+3. **Memory Bank (Zilliz Cloud / Milvus)**: Searches a vector database using Cosine Similarity to retrieve the **Top-K most similar amodal shapes** (priors), returning a Confidence Score ($\lambda_{rag}$).
 4. **Semantic Agent (Qwen3-VL)**: A Vision-Language Model that acts as the logic engine, analyzing the image to reason about which specific parts of the object are occluded.
-5. **Geometry Agent (Pix2Gestalt)**: Combines the Top-K shape priors from the Memory Bank with the internal geometric knowledge of Pix2Gestalt to hallucinate and warp the perfect amodal shape mask.
-6. **Appearance Inpainting (Stable Diffusion v2)**: Extracts the difference between the **Amodal Mask** and the **Visible Mask** and performs a realistic inpainting onto a neutral canvas, guided by the Semantic Agent's prompt.
-7. **Multi-Agent Critic**: Evaluates the structural, textural, and contextual integrity of the inpainted output. If the score falls below a threshold, the prompt is tightened and generation loops again.
+5. **Geometry Agent (Pix2Gestalt)**: Fuses Top-K priors with its geometric knowledge to generate **Multiple Hypotheses (Best-of-N)** (e.g., $M_1, M_2, M_3$). If confidence is low, it safely falls back to Zero-Shot synthesis to avoid Data Leakage.
+6. **Appearance Inpainting (Stable Diffusion v2)**: Realistically inpaints the missing visual textures onto all generated hypotheses, guided by the Semantic Agent's prompt.
+7. **Best-of-N Multi-Agent Critic**: Evaluates the structural, textural, and contextual integrity of all candidate images and selects the single best outcome.
 
 ## 🛠️ Infrastructure & Setup
 
 The entire workflow is heavily optimized to be run instantly on **Google Colab** (A100 or T4 GPUs).
 
 Please see the comprehensive **[COLAB_GUIDE.md](./COLAB_GUIDE.md)** and **[database_setup_guide.md](./database_setup_guide.md)** for running instructions!
+
+### 🗄️ Database Setup Script
+We provide a standalone indexing script `index_cocoa_to_milvus.py` to seamlessly encode (CLIP+DINOv2) and compress (RLE) your dataset into Zilliz Cloud. It also supports a `test_images.txt` exclusion list to guarantee **Zero Data Leakage** during evaluation.
 
 ### Auto-Installation (`colab_setup.py`)
 Our `colab_setup.py` automatically handles the heavily complex legacy installations, including:
