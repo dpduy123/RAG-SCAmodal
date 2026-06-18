@@ -77,13 +77,10 @@ class AmodalCompleter:
         print("[AmodalCompleter] Loading Stable Diffusion inpainting model...")
         
         # --- Monkey-patch for diffusers compatibility with PyTorch 2.4+ ---
-        import torch
-        try:
-            import torch.ao.quantization
-            if getattr(torch.ao.quantization, "CUSTOM_KEY", None) is None:
-                torch.ao.quantization.CUSTOM_KEY = "custom"
-        except ImportError:
-            pass
+        import sys, types
+        if "torch.ao.quantization" not in sys.modules:
+            sys.modules["torch.ao.quantization"] = types.ModuleType("torch.ao.quantization")
+        sys.modules["torch.ao.quantization"].CUSTOM_KEY = "custom"
         # ------------------------------------------------------------------
         
         from diffusers import StableDiffusionInpaintPipeline
