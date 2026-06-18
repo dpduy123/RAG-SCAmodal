@@ -198,6 +198,9 @@ class AmodalCompleter:
         # We will keep track of pad_info using the first hypothesis (M1) as reference
         pad_info = {"needs_outpaint": False, "pad_top": 0, "pad_bottom": 0, "pad_left": 0, "pad_right": 0}
         
+        amodal_mask = amodal_hypotheses[0]
+        missing_mask = amodal_mask & (~visible_mask.astype(bool))
+        
         # ── OUTPAINTING DETECTION ─────────────────────────────────────────
         # If the missing region touches image edges, the object is cropped.
         # Expand the canvas so SD2 can generate content beyond boundaries.
