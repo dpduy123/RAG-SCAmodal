@@ -88,6 +88,9 @@ class ZillizMemoryBank:
         clip_inputs = self.clip_processor(images=crop_pil, return_tensors="pt")
         clip_pixel_values = clip_inputs["pixel_values"].to(self.device).to(self.clip_model.dtype)
         clip_embeds = self.clip_model.get_image_features(pixel_values=clip_pixel_values)
+        if not isinstance(clip_embeds, torch.Tensor):
+            clip_embeds = getattr(clip_embeds, "pooler_output", getattr(clip_embeds, "image_embeds", clip_embeds[0]))
+            
         clip_embeds = clip_embeds / clip_embeds.norm(p=2, dim=-1, keepdim=True)
         
         # 2. DINOv2 features (Geometry/Shape)
