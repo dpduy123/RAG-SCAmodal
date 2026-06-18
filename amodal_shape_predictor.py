@@ -9,6 +9,14 @@ import cv2
 sys.path.insert(0, os.path.join(os.getcwd(), 'pix2gestalt'))
 sys.path.insert(0, os.path.join(os.getcwd(), 'pix2gestalt', 'pix2gestalt'))
 
+# --- Monkey-patch for Python 3.12 compatibility ---
+import pkgutil
+if not hasattr(pkgutil, 'ImpImporter'):
+    class ImpImporter:
+        pass
+    pkgutil.ImpImporter = ImpImporter
+# --------------------------------------------------
+
 try:
     from omegaconf import OmegaConf
     from ldm.util import instantiate_from_config
