@@ -50,6 +50,37 @@ class GeometryAgent:
         """
         self.predictor = shape_predictor
 
+    def _align_prior(self, prior_mask: np.ndarray, target_mask: np.ndarray) -> np.ndarray:
+        H, W = target_mask.shape
+        ys_p, xs_p = np.where(prior_mask)
+        if len(ys_p) == 0: return np.zeros_like(target_mask, dtype=bool)
+        
+        p_y1, p_y2 = ys_p.min(), ys_p.max()
+        p_x1, p_x2 = xs_p.min(), xs_p.max()
+        prior_crop = prior_mask[p_y1:p_y2+1, p_x1:p_x2+1].astype(np.uint8)
+        
+        ys_t, xs_t = np.where(target_mask)
+        if len(ys_t) == 0: return np.zeros_like(target_mask, dtype=bool)
+            
+        t_y1, t_y2 = ys_t.min(), ys_t.max()
+        t_x1, t_x2 = xs_t.min(), xs_t.max()
+        
+        target_w = t_x2 - t_x1 + 1
+        scale = target_w / max((p_x2 - p_x1 + 1), 1)
+        new_w = target_w
+        new_h = int((p_y2 - p_y1 + 1) * scale)
+        if new_h == 0 or new_w == 0: return np.zeros_like(target_mask, dtype=bool)
+            
+        prior_resized = cv2.resize(prior_crop, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        
+        aligned_mask = np.zeros_like(target_mask, dtype=bool)
+        paste_y2 = min(t_y1 + new_h, H)
+        paste_x2 = min(t_x1 + new_w, W)
+        paste_h = paste_y2 - t_y1
+        paste_w = paste_x2 - t_x1
+        aligned_mask[t_y1:paste_y2, t_x1:paste_x2] = prior_resized[:paste_h, :paste_w] > 0
+        return aligned_mask
+
     def predict(self, image_np: np.ndarray, visible_mask: np.ndarray, top_k_priors: List[Dict], semantic_reasoning: str, lambda_rag_threshold: float = 0.6) -> List[np.ndarray]:
         """
         Combines Top-K priors with Pix2Gestalt to produce multiple hypotheses (Best-of-N).
@@ -77,14 +108,13 @@ class GeometryAgent:
         else:
             print(f"[GeometryAgent] High confidence priors found ({len(valid_priors)}). Fusing with RAG shapes.")
             # M2: Fuse with Top-1 Prior
-            prior_1 = valid_priors[0]["amodal_mask"]
-            # To handle shape mismatch, we just union them for this demo.
+            prior_1 = self._align_prior(valid_priors[0]["amodal_mask"], visible_mask)
             m2 = m1 | prior_1 | visible_mask
             hypotheses.append(m2)
             
             # M3: Fuse with Top-2 Prior (or dilate if only 1 valid prior)
             if len(valid_priors) > 1:
-                prior_2 = valid_priors[1]["amodal_mask"]
+                prior_2 = self._align_prior(valid_priors[1]["amodal_mask"], visible_mask)
                 m3 = m1 | prior_2 | visible_mask
             else:
                 kernel = np.ones((5,5), np.uint8)
