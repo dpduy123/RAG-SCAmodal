@@ -31,15 +31,15 @@ else:
 print("=" * 50)
 
 # Install from requirements.txt
-run("pip install -q -r requirements.txt")
+run("pip install -r requirements.txt")
 
 # Install SAM2 (not on PyPI, install via git)
-run("pip install -q git+https://github.com/facebookresearch/sam2.git")
+run("pip install git+https://github.com/facebookresearch/sam2.git")
 
 # Download SAM2.1 checkpoint
 SAM2_CKPT = "sam2.1_hiera_large.pt"
 if not os.path.exists(SAM2_CKPT):
-    run(f"wget -q https://dl.fbaipublicfiles.com/segment_anything_2/092824/{SAM2_CKPT}")
+    run(f"wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/{SAM2_CKPT}")
     print(f"✅ Downloaded {SAM2_CKPT}")
 else:
     print(f"✅ {SAM2_CKPT} already exists")

@@ -60,6 +60,34 @@ print("✅ Đã thiết lập xong môi trường Memory Bank!")
 %run colab_setup.py
 ```
 
+### Cell 3 (Tùy chọn) — Đẩy dữ liệu COCOA lên Zilliz Cloud
+> **Lưu ý:** Bạn chỉ cần chạy bước này **ĐÚNG 1 LẦN DUY NHẤT** ở lần setup đầu tiên để tạo Memory Bank. Những lần sau mở Colab lên để test ảnh thì hãy **bỏ qua** bước này!
+
+1. Upload thư mục `dataset/COCOA/` (chứa các file JSON đã được chia nhỏ như `part1.json`, `part2.json`) lên Colab.
+2. (Quan trọng) Chạy file lọc dữ liệu để loại bỏ tập Test, tránh Data Leakage:
+   ```python
+   !python3 data_preparation/COCOA/remove_test_data.py
+   ```
+3. Chạy vòng lặp để đẩy toàn bộ các file Part lên Zilliz Cloud. File đầu tiên sẽ khởi tạo Collection, các file sau dùng cờ `--append`:
+   
+   ```bash
+   %%bash
+   first=true
+   for file in dataset/COCOA/*.json; do
+     if [ "$first" = true ]; then
+       echo "🚀 Bắt đầu tạo mới Collection với file: $file..."
+       python3 data_preparation/COCOA/index_cocoa_to_milvus.py --json_path "$file"
+       first=false
+     else
+       echo "🔄 Đang nối tiếp (append) file: $file..."
+       python3 data_preparation/COCOA/index_cocoa_to_milvus.py --json_path "$file" --append
+     fi
+   done
+   ```
+*(Cứ mỗi 500 ảnh, hệ thống sẽ đẩy lên 1 batch. Quá trình này có thể tốn khá nhiều thời gian tùy số lượng dữ liệu của bạn).*
+
+---
+
 Script này sẽ tự động:
 - ✅ Cài dependencies (kể cả pymilvus, Qwen-VL).
 - ✅ Download SAM2.1 checkpoint.
