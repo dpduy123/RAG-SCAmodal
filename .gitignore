@@ -46,3 +46,4 @@ ref/
 fullCOCOA/
 latexReport/
 dataset/
+.env
