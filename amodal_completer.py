@@ -51,7 +51,7 @@ class AmodalCompleter:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         
         # Initialize instances only if not already loaded globally
-        if AmodalCompleter._shape_predictor is None:
+        if AmodalCompleter._shape_predictor is None or AmodalCompleter._shape_predictor.model is None:
             from amodal_shape_predictor import Pix2GestaltPredictor
             AmodalCompleter._shape_predictor = Pix2GestaltPredictor(device=self.device)
             AmodalCompleter._geometry_agent = GeometryAgent(AmodalCompleter._shape_predictor)

@@ -1,6 +1,8 @@
 import os
 import torch
 import numpy as np
+import zlib
+import base64
 from PIL import Image
 from pymilvus import connections, Collection, utility
 from dotenv import load_dotenv
@@ -149,14 +151,21 @@ class ZillizMemoryBank:
             proposals = []
             for hits in results:
                 for hit in hits:
-                    # In a real scenario, you decode the 'amodal_mask_rle' or path to the mask image
-                    # Here we mock the mask decoding for now since the schema is not fully defined
-                    # mask = decode_rle(hit.entity.get('amodal_mask_rle'))
-                    # proposals.append({"amodal_mask": mask, "score": hit.distance, "id": hit.id})
-                    pass
+                    # Decode the amodal_mask_rle back to numpy array
+                    meta_str = hit.entity.get('amodal_mask_rle')
+                    try:
+                        meta, encoded_str = meta_str.split('|')
+                        h_str, w_str = meta.split(',')
+                        h, w = int(h_str), int(w_str)
+                        compressed = base64.b64decode(encoded_str)
+                        mask_bytes = zlib.decompress(compressed)
+                        mask_np = np.frombuffer(mask_bytes, dtype=np.uint8).reshape((h, w))
+                        amodal_mask = mask_np > 0
+                        proposals.append({"amodal_mask": amodal_mask, "score": hit.distance, "id": hit.id})
+                    except Exception as e:
+                        print(f"[ZillizMemoryBank] Error decoding mask {hit.id}: {e}")
             
-            # Temporary MOCK while schema is finalized
-            print(f"[ZillizMemoryBank] Retrieved {len(proposals)} masks (MOCKED decode).")
+            print(f"[ZillizMemoryBank] Retrieved {len(proposals)} masks from Zilliz Cloud.")
             return proposals
             
         except Exception as e:
