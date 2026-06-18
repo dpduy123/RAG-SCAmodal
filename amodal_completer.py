@@ -195,10 +195,13 @@ class AmodalCompleter:
         # Geometry Agent now returns a list of hypotheses
         amodal_hypotheses = AmodalCompleter._geometry_agent.predict(image, visible_mask, top_k_priors, vlm_guidance, lambda_rag_threshold=0.6)
         
-        # We will keep track of pad_info using the first hypothesis (M1) as reference
+        # We will use the RAG-fused hypothesis (M2) if available, otherwise fallback to M1
+        if len(amodal_hypotheses) > 1:
+            amodal_mask = amodal_hypotheses[1]
+        else:
+            amodal_mask = amodal_hypotheses[0]
+            
         pad_info = {"needs_outpaint": False, "pad_top": 0, "pad_bottom": 0, "pad_left": 0, "pad_right": 0}
-        
-        amodal_mask = amodal_hypotheses[0]
         missing_mask = amodal_mask & (~visible_mask.astype(bool))
         
         # ── OUTPAINTING DETECTION ─────────────────────────────────────────
@@ -234,6 +237,7 @@ class AmodalCompleter:
                 "critique_history": [],
                 "final_score": None,
                 "pad_info": pad_info,
+                "top_k_priors": top_k_priors,
             }
 
         # Fuse the two guidance signals via CLIP-verified Qwen reasoning.
@@ -332,6 +336,7 @@ class AmodalCompleter:
             "critique_history": critique_history,
             "final_score": best_score if enable_critic else None,
             "pad_info": pad_info,
+            "top_k_priors": top_k_priors,
         }
 
     def _compose_for_critic(

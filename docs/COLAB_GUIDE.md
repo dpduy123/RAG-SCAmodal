@@ -156,6 +156,24 @@ print("✅ Amodal completion done!")
 ```
 
 ```python
+# ── Xem các mẫu hình bóng (Top-K Priors) lấy từ Zilliz Memory Bank ──
+top_k_priors = outputs.get("top_k_priors", [])
+if len(top_k_priors) > 0:
+    print(f"✅ Đã tải thành công {len(top_k_priors)} mẫu hình bóng từ Zilliz Memory Bank!")
+    fig, axes = plt.subplots(1, len(top_k_priors), figsize=(5 * len(top_k_priors), 5))
+    if len(top_k_priors) == 1:
+        axes = [axes]
+    for i, prior in enumerate(top_k_priors):
+        axes[i].imshow(prior["amodal_mask"], cmap="gray")
+        axes[i].set_title(f"Prior {i+1}\n(Score: {prior.get('score', 0):.2f})")
+        axes[i].axis("off")
+    plt.suptitle("Top-K Retrieved Amodal Shapes from Memory Bank", fontsize=16)
+    plt.show()
+else:
+    print("❌ Không tìm thấy mẫu hình bóng nào trong Memory Bank.")
+```
+
+```python
 # ── Xem kết quả ──
 fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
