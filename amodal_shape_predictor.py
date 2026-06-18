@@ -15,6 +15,13 @@ if not hasattr(pkgutil, 'ImpImporter'):
     class ImpImporter:
         pass
     pkgutil.ImpImporter = ImpImporter
+
+import importlib.machinery
+if not hasattr(importlib.machinery.FileFinder, "find_module"):
+    def find_module(self, fullname, path=None):
+        spec = self.find_spec(fullname)
+        return spec.loader if spec is not None else None
+    importlib.machinery.FileFinder.find_module = find_module
 # --------------------------------------------------
 
 try:
