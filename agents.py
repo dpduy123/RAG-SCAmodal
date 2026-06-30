@@ -87,38 +87,41 @@ class GeometryAgent:
         Returns a list of 3 amodal masks: [M1, M2, M3].
         """
         print(f"[GeometryAgent] Generating 3 Multiple Hypotheses (Best-of-N)...")
-        
-        # 1. Base Hypothesis (M1): Pure Pix2Gestalt (Zero-Shot model prediction)
-        raw_pred = self.predictor.predict_full_shape(image_np, visible_mask)
-        m1 = raw_pred | visible_mask
-        
-        hypotheses = [m1]
+        hypotheses = []
         
         # Check retrieval confidence
         valid_priors = [p for p in top_k_priors if p.get("score", 0) >= lambda_rag_threshold]
         
         if len(valid_priors) == 0:
-            print("[GeometryAgent] Retrieval confidence too low. Generating synthetic hypotheses (Dilation/Erosion).")
-            # M2: Slightly dilated
+            print("[GeometryAgent] Retrieval confidence too low. Falling back to Zero-Shot hypotheses.")
+            m1 = self.predictor.predict_full_shape(image_np, visible_mask, text_prompt=semantic_reasoning)
+            hypotheses.append(m1)
+            
+            # Synthetic augmentations for M2 and M3
             kernel = np.ones((5,5), np.uint8)
             m2 = cv2.dilate(m1.astype(np.uint8), kernel, iterations=1).astype(bool) | visible_mask
-            # M3: Even more dilated or eroded
             m3 = cv2.dilate(m1.astype(np.uint8), kernel, iterations=2).astype(bool) | visible_mask
             hypotheses.extend([m2, m3])
         else:
-            print(f"[GeometryAgent] High confidence priors found ({len(valid_priors)}). Fusing with RAG shapes.")
-            # M2: Fuse with Top-1 Prior
-            prior_1 = self._align_prior(valid_priors[0]["amodal_mask"], visible_mask)
-            m2 = m1 | prior_1 | visible_mask
-            hypotheses.append(m2)
+            print(f"[GeometryAgent] High confidence priors found ({len(valid_priors)}). Using Prior-Conditioned Diffusion.")
             
-            # M3: Fuse with Top-2 Prior (or dilate if only 1 valid prior)
+            # M1: Conditioned on Top-1 Prior
+            prior_1 = self._align_prior(valid_priors[0]["amodal_mask"], visible_mask)
+            m1 = self.predictor.predict_full_shape(image_np, visible_mask, prior_mask=prior_1, text_prompt=semantic_reasoning)
+            hypotheses.append(m1)
+            
+            # M2: Conditioned on Top-2 Prior (if available)
             if len(valid_priors) > 1:
                 prior_2 = self._align_prior(valid_priors[1]["amodal_mask"], visible_mask)
-                m3 = m1 | prior_2 | visible_mask
+                m2 = self.predictor.predict_full_shape(image_np, visible_mask, prior_mask=prior_2, text_prompt=semantic_reasoning)
             else:
                 kernel = np.ones((5,5), np.uint8)
-                m3 = cv2.dilate(m1.astype(np.uint8), kernel, iterations=1).astype(bool) | visible_mask
+                m2 = cv2.dilate(m1.astype(np.uint8), kernel, iterations=1).astype(bool) | visible_mask
+            hypotheses.append(m2)
+            
+            # M3: Zero-Shot Baseline (No prior) to ensure hypothesis diversity
+            print("[GeometryAgent] Generating baseline zero-shot hypothesis for M3 to ensure diversity.")
+            m3 = self.predictor.predict_full_shape(image_np, visible_mask, prior_mask=None, text_prompt=semantic_reasoning)
             hypotheses.append(m3)
             
         print(f"[GeometryAgent] Generated {len(hypotheses)} amodal hypotheses successfully.")

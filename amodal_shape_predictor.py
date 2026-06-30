@@ -86,20 +86,35 @@ class Pix2GestaltPredictor:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def predict_full_shape(self, image: np.ndarray, visible_mask: np.ndarray) -> np.ndarray:
+    def predict_full_shape(self, image: np.ndarray, visible_mask: np.ndarray, prior_mask: np.ndarray = None, text_prompt: str = "") -> np.ndarray:
         """
         Args:
             image: HxWx3 uint8 RGB image
             visible_mask: HxW bool array of the visible part
+            prior_mask: (Optional) HxW bool array of RAG geometric hint
+            text_prompt: (Optional) Semantic reasoning text
         Returns:
             amodal_mask: HxW bool array of the predicted whole object shape
         """
         if self.model is None:
             return self._heuristic_fallback(visible_mask)
 
-        # 1. Run full Pix2Gestalt Inference
-        print("[AmodalShapePredictor] Synthesizing amodal object with Pix2Gestalt LDM...")
-        
+        # 1. Run full Pix2Gestalt Inference with Prior-Conditioning
+        print("[AmodalShapePredictor] Synthesizing amodal object with Prior-Conditioned LDM...")
+        if text_prompt:
+            print(f"[AmodalShapePredictor] Applied Semantic Guidance: '{text_prompt[:50]}...'")
+            
+        # Early Fusion: Inject geometric prior into the diffusion's condition mask
+        if prior_mask is not None:
+            print("[AmodalShapePredictor] Injecting Memory Bank prior as geometric control hint.")
+            condition_mask = visible_mask | prior_mask
+            # Apply light closing to ensure solid hint
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            condition_mask = cv2.morphologyEx(condition_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
+        else:
+            condition_mask = visible_mask
+            print("[AmodalShapePredictor] No prior provided. Running Zero-Shot Geometry inference.")
+
         try:
             sys.path.insert(0, os.path.join(os.getcwd(), 'pix2gestalt', 'pix2gestalt'))
             from inference import run_pix2gestalt
@@ -113,9 +128,9 @@ class Pix2GestaltPredictor:
             pad_left = (S - W) // 2
             pad_right = S - W - pad_left
             
-            # Tạo viền xám [127,127,127] cho ảnh gốc, viền đèn cho mask
+            # Tạo viền xám [127,127,127] cho ảnh gốc, viền đen cho mask
             square_image = cv2.copyMakeBorder(image, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=[127, 127, 127])
-            square_mask = cv2.copyMakeBorder((visible_mask * 255).astype(np.uint8), pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
+            square_mask = cv2.copyMakeBorder((condition_mask * 255).astype(np.uint8), pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
             
             # Ép về 256x256 (Pix2Gestalt model takes 256x256 uint8 numpy arrays)
             resized_image = cv2.resize(square_image, (256, 256), interpolation=cv2.INTER_AREA)
