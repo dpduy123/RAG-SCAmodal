@@ -82,6 +82,8 @@ class AmodalCompleter:
             import torch.ao.quantization
             if not hasattr(torch.ao.quantization, 'CUSTOM_KEY'):
                 torch.ao.quantization.CUSTOM_KEY = 'custom_module_class'
+            if not hasattr(torch.ao.quantization, 'NUMERIC_DEBUG_HANDLE_KEY'):
+                torch.ao.quantization.NUMERIC_DEBUG_HANDLE_KEY = 'numeric_debug_handle_key'
         except Exception:
             pass
         # ---------------------------------------------------
